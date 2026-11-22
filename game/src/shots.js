@@ -9,13 +9,14 @@
 // the case, then (for the end scene) walks out through the GETAWAY door. When
 // a guard's suspicion climbs past 0.3 it backs away from that guard until the
 // heat is off, then replans.
-import { BOUNDS, STEP, THIEF } from './config.js';
+import { BOUNDS, CAMERA, STEP, THIEF } from './config.js';
 import { EVENT_CAUGHT, EVENT_CLEAR, EVENT_LOOT } from './world.js';
 import { SCREEN_CLEAR, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
 
 const CELL = 40;
 const START_SECONDS = 5;
 const PLAY_SECONDS = 90;
+const COVER_LIMIT_SECONDS = 150;
 const END_LIMIT_SECONDS = 600;
 const RETREAT_SECONDS = 2.0;
 const COLS = Math.floor(BOUNDS.width / CELL);
@@ -185,25 +186,61 @@ function safestSpot(world, guard) {
   return bestSpot;
 }
 
+/** True when the thief stands inside any live camera cone. */
+function thiefInCameraCone(world) {
+  const thief = world.state.thief;
+  for (const camera of world.state.cameras) {
+    if (camera.hacked) continue;
+    const dx = thief.x - camera.x;
+    const dy = thief.y - camera.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist > CAMERA.range) continue;
+    const angle = Math.atan2(dy, dx);
+    let diff = angle - camera.angle;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    if (Math.abs(diff) > CAMERA.halfAngle) continue;
+    if (world.lineOfSight(camera.x, camera.y, thief.x, thief.y)) return true;
+  }
+  return false;
+}
+
 /**
- * Set `world` to the named scene (start, play or end; any other name is
+ * The autopilot's tool use: smoke when a guard is hot on the thief's tail,
+ * EMP (end scene only, where the walk out matters more than the drama)
+ * when a live camera cone covers the thief. The cover and play scenes keep
+ * their cones live for the frame.
+ */
+function autopilotTools(world, sceneName) {
+  const tools = world.state.tools;
+  let smoke = false;
+  let emp = false;
+  const hot = hottestGuard(world);
+  if (hot && hot.suspicion > 0.6 && tools.smoke > 0) smoke = true;
+  if (sceneName === 'end' && tools.emp > 0 && thiefInCameraCone(world)) emp = true;
+  return { smoke, emp };
+}
+
+/**
+ * Set `world` to the named scene (start, play, cover or end; any other name is
  * start) and return the screen to draw over it and the best take to show.
  * `roomIndex` stages a later room instead of the first (for verification).
  */
 export function stageShot(name, world, roomIndex = 0) {
   world.reset();
   if (roomIndex > 0) world.loadRoom(roomIndex);
-  if (name !== 'play' && name !== 'end') {
+  if (name !== 'play' && name !== 'end' && name !== 'cover') {
     for (let i = 0; i < START_SECONDS / STEP; i += 1) {
       world.step(STEP, { dx: 0, dy: 0, sneak: false, use: false, throwAt: null }, true);
     }
     return { screen: SCREEN_TITLE, best: 0 };
   }
 
-  const limit = name === 'end' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  // The play scene keeps the camera live, so its red cone sweeps the frame;
-  // the end scene hacks it first, for a reliable walk to the GETAWAY door.
-  let phase = name === 'play' ? 'loot' : 'hack';
+  const limit = name === 'end' ? END_LIMIT_SECONDS : name === 'cover' ? COVER_LIMIT_SECONDS : PLAY_SECONDS;
+  // The play and cover scenes keep the camera live, so its red cone sweeps
+  // the frame; the end scene hacks it first, for a reliable walk to the
+  // GETAWAY door.
+  let phase = name === 'play' || name === 'cover' ? 'loot' : 'hack';
   let path = null;
   let pathIndex = 0;
   let replanIn = 0;
@@ -253,15 +290,17 @@ export function stageShot(name, world, roomIndex = 0) {
     // A hot guard means fall back: run for the hiding spot farthest from
     // that guard until the heat is off, then replan. The retreat follows a
     // planned path, so walls break the guard's line of sight on the way.
+    // Never during the getaway, though: once the van timer is running the
+    // only correct move is the door, and retreating strands the thief.
     const hot = hottestGuard(world);
-    if (hot && state.elapsed > retreatUntil) {
+    if (hot && !state.getaway.active && state.elapsed > retreatUntil) {
       retreatUntil = state.elapsed + RETREAT_SECONDS;
       const home = safestSpot(world, hot);
       retreatPath = planPath(world, state.thief.x, state.thief.y, home.x, home.y);
       retreatIndex = 0;
       retreatHome = home;
     }
-    if (state.elapsed < retreatUntil && hot) {
+    if (state.elapsed < retreatUntil && hot && !state.getaway.active) {
       let input = { dx: 0, dy: 0, sneak: false, use: false, throwAt: null };
       if (retreatPath && retreatIndex < retreatPath.length) {
         const waypoint = retreatPath[retreatIndex];
@@ -270,6 +309,9 @@ export function stageShot(name, world, roomIndex = 0) {
       } else if (retreatHome) {
         input = steerToward(world, retreatHome.x, retreatHome.y, false);
       }
+      const retreatTools = autopilotTools(world, name);
+      input.smoke = retreatTools.smoke;
+      input.emp = retreatTools.emp;
       events = world.step(STEP, input, false);
       if (events & EVENT_CAUGHT) break;
       continue;
@@ -297,9 +339,10 @@ export function stageShot(name, world, roomIndex = 0) {
         const waypoint = path[pathIndex];
         const d = Math.hypot(waypoint.x - state.thief.x, waypoint.y - state.thief.y);
         if (d < 14) pathIndex += 1;
-        else if (world.coneDangerAt(waypoint.x, waypoint.y) > 50) {
+        else if (!state.getaway.active && world.coneDangerAt(waypoint.x, waypoint.y) > 50) {
           // The next step is under a live cone: hold still and let the
-          // patrol sweep past instead of walking into it.
+          // patrol sweep past instead of walking into it — unless the van
+          // timer is running, when waiting strands the thief.
           input = { dx: 0, dy: 0, sneak: false, use: false, throwAt: null };
         } else input = steerToward(world, waypoint.x, waypoint.y, false,
           wary || world.coneDangerAt(waypoint.x, waypoint.y) > 25);
@@ -308,9 +351,10 @@ export function stageShot(name, world, roomIndex = 0) {
       const waypoint = path[pathIndex];
       const d = Math.hypot(waypoint.x - state.thief.x, waypoint.y - state.thief.y);
       if (d < 14) pathIndex += 1;
-      else if (world.coneDangerAt(waypoint.x, waypoint.y) > 50) {
+      else if (!state.getaway.active && world.coneDangerAt(waypoint.x, waypoint.y) > 50) {
         // The next step is under a live cone: hold still and let the
-        // patrol sweep past instead of walking into it.
+        // patrol sweep past instead of walking into it — unless the van
+        // timer is running, when waiting strands the thief.
         input = { dx: 0, dy: 0, sneak: false, use: false, throwAt: null };
       } else input = steerToward(world, waypoint.x, waypoint.y, false,
         wary || world.coneDangerAt(waypoint.x, waypoint.y) > 25);
@@ -319,13 +363,21 @@ export function stageShot(name, world, roomIndex = 0) {
     const atTarget = Math.hypot(target.x - state.thief.x, target.y - state.thief.y) < 46;
     if (atTarget && phase !== 'exit') input.use = true;
 
+    const tools = autopilotTools(world, name);
+    input.smoke = tools.smoke;
+    input.emp = tools.emp;
     events = world.step(STEP, input, false);
     if (events & EVENT_CAUGHT) break;
     if (events & EVENT_LOOT) {
-      if (name === 'play') break; // play frame: loot in hand, heading out
+      if (name === 'play' || name === 'cover') break; // play/cover frame: loot in hand
       phase = 'exit';
       path = null;
     }
+    // The cover stops the first time the thief enters the middle of the
+    // room: the loot case still glows above, the cones sweep around the
+    // thief, and the frame shows the whole heist at once — not the loot
+    // moment, when the case is already empty.
+    if (name === 'cover' && state.elapsed > 2 && state.thief.y < 480) break;
     if (phase === 'hack') {
       const open = state.room.junctions.find((j) => !state.cameras[j.camera].hacked);
       if (!open) {

@@ -4,8 +4,13 @@
 // approaches, and the GETAWAY door waits at the bottom. Waypoint legs were
 // picked so no patrol leg crosses a wall or a case.
 //
+// The fourth floor — the rooftop — lives in room4.js and is registered
+// below, so the list below stays the three interior floors.
+//
 // Coordinates live inside BOUNDS (x 16..1264, y 96..704); the HUD strip sits
 // above y 88. Angles are radians, 0 = east, PI/2 = south (down the screen).
+
+import { ROOM4 } from './room4.js';
 
 export const ROOMS = [
   {
@@ -158,6 +163,8 @@ export const ROOMS = [
       { x1: 300, y1: 580, x2: 980, y2: 580, phase: 1.5, period: 3.4, onFrac: 0.5 },
     ],
   },
+  // Floor 4 — the rooftop, defined in room4.js.
+  ROOM4,
 ];
 
 /** Total value on the table across all three rooms (loot + side loot). */

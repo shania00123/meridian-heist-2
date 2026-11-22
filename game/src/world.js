@@ -9,6 +9,15 @@ import {
   CRACK_SECONDS, GUARD, HACK_SECONDS, LASER, THIEF,
 } from './config.js';
 import { ROOMS } from './levels.js';
+import {
+  EMP_ALARM_COST, createToolState, empActive, resetRoomTools,
+  resetRunTools, smokeBlocks, tryEmp, trySmoke, updateTools,
+} from './tools.js';
+import { pointInVent, ventForRoom } from './routes.js';
+import {
+  GETAWAY_ALARM_RISE, GETAWAY_REACT_SECONDS, createGetawayState, rankForGetaway, startGetaway,
+  updateGetaway,
+} from './getaway.js';
 
 export const EVENT_PICKUP = 1;
 export const EVENT_LOOT = 2;
@@ -18,9 +27,12 @@ export const EVENT_CAUGHT = 16;
 export const EVENT_SPOT = 32;
 export const EVENT_LASER = 64;
 export const EVENT_COIN = 128;
+export const EVENT_SMOKE = 256;
+export const EVENT_EMP = 512;
 
 export const CAUGHT_GUARD = 'guard';
 export const CAUGHT_LOCKDOWN = 'lockdown';
+export const CAUGHT_VAN = 'van';
 
 function clamp(value, low, high) {
   return Math.max(low, Math.min(high, value));
@@ -84,6 +96,10 @@ export function createWorld(random) {
     lasers: [],
     coins: COIN_COUNT,
     thrownCoin: null,
+    tools: createToolState(),
+    vent: null,
+    getaway: createGetawayState(),
+    caughtBy: null,
     alarm: 0,
     elapsed: 0,
     take: 0, // this room's take so far
@@ -165,6 +181,13 @@ export function createWorld(random) {
       wait: 0,
       seedOffset: random() * Math.PI * 2,
       index: gi,
+      // Where this guard last saw the thief: a chasing guard runs here,
+      // not at the thief's live position, so smoke, vents and walls are
+      // real counterplay instead of decoration.
+      lastKnown: { x: g.waypoints[0][0], y: g.waypoints[0][1] },
+      // Elapsed seconds until this guard starts running after being
+      // alerted by the crack (it needs a moment to orient). 0 normally.
+      reactUntil: 0,
     }));
     state.cameras = state.room.cameras.map((c) => ({
       ...c,
@@ -183,10 +206,15 @@ export function createWorld(random) {
     state.spotted = false;
     state.phase = 'play';
     state.caughtReason = null;
+    state.vent = ventForRoom(index);
+    resetRoomTools(state.tools);
+    state.getaway = createGetawayState();
+    state.caughtBy = null;
   }
 
   function reset() {
     state.totalTake = 0;
+    resetRunTools(state.tools);
     loadRoom(0);
   }
 
@@ -204,6 +232,10 @@ export function createWorld(random) {
   }
 
   function guardSeesThief(guard) {
+    // A thief inside a vent is hidden, and smoke between the guard and the
+    // thief blinds the cone — the guard cannot see through either.
+    if (pointInVent(state.vent, state.thief.x, state.thief.y)) return { sees: false, dist: Infinity };
+    if (smokeBlocks(state.tools, guard.x, guard.y, state.thief.x, state.thief.y)) return { sees: false, dist: Infinity };
     const dx = state.thief.x - guard.x;
     const dy = state.thief.y - guard.y;
     const dist = Math.hypot(dx, dy);
@@ -218,6 +250,11 @@ export function createWorld(random) {
 
   function cameraSeesThief(camera) {
     if (camera.hacked) return false;
+    // An EMP blackout blinds every camera; a vent hides the thief; smoke
+    // between the camera and the thief blinds this cone.
+    if (empActive(state.tools, state.elapsed)) return false;
+    if (pointInVent(state.vent, state.thief.x, state.thief.y)) return false;
+    if (smokeBlocks(state.tools, camera.x, camera.y, state.thief.x, state.thief.y)) return false;
     const dx = state.thief.x - camera.x;
     const dy = state.thief.y - camera.y;
     const dist = Math.hypot(dx, dy);
@@ -239,8 +276,11 @@ export function createWorld(random) {
     const thief = state.thief;
 
     // --- the thief ---------------------------------------------------------
-    const speed = input.sneak ? THIEF.sneakSpeed : THIEF.walkSpeed;
-    state.thief.sneaking = input.sneak;
+    // Crawling through a vent is slow: the thief moves at sneak speed
+    // inside one, whether sneaking or not.
+    const inVent = pointInVent(state.vent, thief.x, thief.y);
+    const speed = input.sneak || inVent ? THIEF.sneakSpeed : THIEF.walkSpeed;
+    state.thief.sneaking = input.sneak || inVent;
     if (input.dx !== 0 || input.dy !== 0) {
       thief.x += input.dx * speed * dt;
       thief.y += input.dy * speed * dt;
@@ -264,6 +304,18 @@ export function createWorld(random) {
       state.thrownCoin.age += dt;
       if (state.thrownCoin.age > 6) state.thrownCoin = null;
     }
+
+    // --- tools -------------------------------------------------------------
+    // One-shot presses: Q drops smoke at the thief's feet, F fires the EMP.
+    // The EMP's surge trips the alarm the moment it goes off.
+    if (!harmless) {
+      if (input.smoke && trySmoke(state.tools, thief.x, thief.y)) events |= EVENT_SMOKE;
+      if (input.emp && tryEmp(state.tools, state.elapsed)) {
+        state.alarm = Math.min(ALARM.max, state.alarm + EMP_ALARM_COST);
+        events |= EVENT_EMP;
+      }
+    }
+    updateTools(state.tools, dt);
 
     // --- cameras -----------------------------------------------------------
     let cameraSeen = false;
@@ -291,6 +343,9 @@ export function createWorld(random) {
       if (seen.sees) {
         const rise = seen.dist < 90 ? GUARD.suspicionRiseClose : GUARD.suspicionRise;
         guard.suspicion = Math.min(1, guard.suspicion + rise * (state.thief.sneaking ? 0.55 : 1) * dt);
+        // The guard remembers exactly where it saw the thief.
+        guard.lastKnown.x = state.thief.x;
+        guard.lastKnown.y = state.thief.y;
         if (guard.suspicion >= 1 && guard.mode !== 'chase') {
           guard.mode = 'chase';
           guard.loseSight = 0;
@@ -305,15 +360,32 @@ export function createWorld(random) {
         if (seen.sees) guard.loseSight = 0;
         else {
           guard.loseSight += dt;
-          if (guard.loseSight > GUARD.loseSightSeconds) {
+          // During the getaway the guards hunt until the thief is out: they
+          // do not give up and drift back to patrol while the van waits.
+          if (guard.loseSight > GUARD.loseSightSeconds && !state.getaway.active) {
             guard.mode = 'patrol';
             guard.suspicion = 0.5;
           }
         }
-        moveToward(guard, thief.x, thief.y, GUARD.chaseSpeed, dt, GUARD.radius);
+        // Chase the last known position, not the thief's live one: a guard
+        // that lost sight runs to where it last saw the thief and looks.
+        // A guard alerted by the crack stands and orients first.
+        let arrived = false;
+        if (state.elapsed >= guard.reactUntil) {
+          arrived = moveToward(guard, guard.lastKnown.x, guard.lastKnown.y, GUARD.chaseSpeed, dt, GUARD.radius);
+        }
+        if (arrived && !seen.sees) {
+          // Lost the trail at the last known spot: during the getaway the
+          // guards cut off the GETAWAY door, the one way out.
+          if (state.getaway.active) {
+            guard.lastKnown.x = state.room.exit.x + state.room.exit.w / 2;
+            guard.lastKnown.y = state.room.exit.y + state.room.exit.h / 2;
+          }
+        }
         if (Math.hypot(guard.x - thief.x, guard.y - thief.y) < THIEF.catchRadius) {
           state.phase = 'caught';
           state.caughtReason = CAUGHT_GUARD;
+          state.caughtBy = `Guard ${guard.index + 1}`;
           events |= EVENT_CAUGHT;
           return events;
         }
@@ -350,6 +422,7 @@ export function createWorld(random) {
       if (state.alarm >= ALARM.max) {
         state.phase = 'caught';
         state.caughtReason = CAUGHT_LOCKDOWN;
+        state.caughtBy = 'The alarm hit 100%';
         events |= EVENT_CAUGHT;
         return events;
       }
@@ -368,6 +441,21 @@ export function createWorld(random) {
         state.take += loot.value;
         state.crackProgress = 0;
         events |= EVENT_LOOT;
+        // The loud part starts: the alarm jumps, every guard turns and
+        // runs for the thief, and the getaway van starts its 20-second wait.
+        // The alarm tells every guard where the break-in is, so they run
+        // for the case first — the thief's head start is the race. A guard
+        // that was not already chasing needs a moment to orient before it
+        // runs; one already on the thief's tail does not.
+        startGetaway(state.getaway);
+        state.alarm = Math.min(ALARM.max, state.alarm + GETAWAY_ALARM_RISE);
+        for (const guard of state.guards) {
+          if (guard.mode !== 'chase') guard.reactUntil = state.elapsed + GETAWAY_REACT_SECONDS;
+          guard.mode = 'chase';
+          guard.loseSight = 0;
+          guard.lastKnown.x = thief.x;
+          guard.lastKnown.y = thief.y;
+        }
       }
     } else if (state.crackProgress > 0) {
       state.crackProgress = Math.max(0, state.crackProgress - dt * 2);
@@ -409,12 +497,23 @@ export function createWorld(random) {
     // --- getaway -------------------------------------------------------------
     // The door triggers when the thief's centre reaches it (a radius of grace
     // around the door frame, so stopping just at its edge still counts).
+    // The van timer is checked first: reaching the door on the very step the
+    // van leaves still counts as an escape.
     const exit = state.room.exit;
     if (thief.carrying && thief.x > exit.x - 12 && thief.x < exit.x + exit.w + 12 &&
         thief.y > exit.y - 14 && thief.y < exit.y + exit.h + 14) {
+      state.getaway.rank = rankForGetaway(state.alarm, state.getaway.timer);
+      state.getaway.active = false;
       state.phase = 'clear';
       state.totalTake += state.take;
       events |= EVENT_CLEAR;
+    } else if (state.getaway.active && updateGetaway(state.getaway, dt)) {
+      // The van left without the thief: stranded inside the Meridian.
+      state.phase = 'caught';
+      state.caughtReason = CAUGHT_VAN;
+      state.caughtBy = 'The getaway van';
+      events |= EVENT_CAUGHT;
+      return events;
     }
 
     return events;

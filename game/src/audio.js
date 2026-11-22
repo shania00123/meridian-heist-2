@@ -84,6 +84,16 @@ export function createAudio() {
       tone(1200, 0.09, 'square', 0.12);
       tone(900, 0.12, 'square', 0.1, 0.07);
     },
+    smoke() {
+      // A soft whoosh: low noise-like sweep as the bomb pops.
+      tone(420, 0.25, 'sine', 0.12);
+      tone(300, 0.3, 'sine', 0.1, 0.08);
+    },
+    emp() {
+      // A sharp zap, then a dying hum as the cameras go dark.
+      tone(1800, 0.06, 'sawtooth', 0.14);
+      tone(220, 0.4, 'sawtooth', 0.1, 0.06);
+    },
     caught() {
       tone(220, 0.25, 'sawtooth', 0.18);
       tone(165, 0.35, 'sawtooth', 0.18, 0.2);

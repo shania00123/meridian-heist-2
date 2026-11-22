@@ -4,6 +4,8 @@
 // gold-trimmed walls, glass cases, amber guard cones, red camera cones,
 // blinking lasers, the thief, the HUD and the panels.
 import { BOUNDS, FIELD, FONT, PALETTE, THIEF } from './config.js';
+import { ROOMS } from './levels.js';
+import { empActive, empSecondsLeft } from './tools.js';
 
 export const SCREEN_TITLE = 'title';
 export const SCREEN_PLAY = 'play';
@@ -116,6 +118,26 @@ export function createRenderer(canvas) {
 
   function drawRoom(state) {
     const room = state.room;
+    // The vent crawlspace: a hatched service strip along one wall. Inside
+    // it the thief is hidden from every cone — the grate reads as a second
+    // route the moment the eye lands on it.
+    if (state.vent) {
+      const vent = state.vent;
+      context.fillStyle = '#232c3d';
+      context.fillRect(vent.x, vent.y, vent.w, vent.h);
+      context.strokeStyle = '#5b7a9e';
+      context.lineWidth = 2;
+      context.strokeRect(vent.x, vent.y, vent.w, vent.h);
+      context.strokeStyle = '#3a4a61';
+      context.lineWidth = 1;
+      for (let y = vent.y + 16; y < vent.y + vent.h; y += 16) {
+        context.beginPath();
+        context.moveTo(vent.x + 4, y);
+        context.lineTo(vent.x + vent.w - 4, y);
+        context.stroke();
+      }
+      text('VENT', vent.x + vent.w / 2, vent.y + vent.h / 2 + 4, 12, '#8fb3d9', 'center');
+    }
     // Interior walls.
     for (const wall of room.walls) {
       context.fillStyle = PALETTE.wall;
@@ -239,6 +261,23 @@ export function createRenderer(canvas) {
       context.beginPath();
       context.arc(cx - 4, cy - 4, 4, 0, Math.PI * 2);
       context.fill();
+    } else if (loot.kind === 'star') {
+      // The Meridian Star: a five-pointed star, gold on the dusk roof.
+      context.fillStyle = '#ffe27a';
+      context.beginPath();
+      for (let i = 0; i < 10; i += 1) {
+        const angle = -Math.PI / 2 + (i * Math.PI) / 5;
+        const radius = i % 2 === 0 ? 15 : 6;
+        const px = cx + Math.cos(angle) * radius;
+        const py = cy + Math.sin(angle) * radius;
+        if (i === 0) context.moveTo(px, py);
+        else context.lineTo(px, py);
+      }
+      context.closePath();
+      context.fill();
+      context.strokeStyle = '#ffffff';
+      context.lineWidth = 1.5;
+      context.stroke();
     } else {
       // crown
       context.fillStyle = PALETTE.gold;
@@ -264,10 +303,28 @@ export function createRenderer(canvas) {
   }
 
   function drawConesAndActors(state) {
-    // Camera cones first (under the guards).
+    const emp = empActive(state.tools, state.elapsed);
+    // Camera cones first (under the guards). An EMP blackout kills them all.
     for (const camera of state.cameras) {
-      if (camera.hacked) continue;
+      if (camera.hacked || emp) continue;
       cone(camera.x, camera.y, camera.angle, 0.49, 275, PALETTE.coneCamera, PALETTE.coneCameraEdge);
+    }
+    // Smoke clouds: thick grey discs that blind every cone crossing them.
+    for (const cloud of state.tools.smokeClouds) {
+      context.fillStyle = 'rgba(148, 155, 168, 0.45)';
+      context.beginPath();
+      context.arc(cloud.x, cloud.y, cloud.radius, 0, Math.PI * 2);
+      context.fill();
+      context.strokeStyle = 'rgba(210, 216, 226, 0.6)';
+      context.lineWidth = 2;
+      context.stroke();
+      context.fillStyle = 'rgba(148, 155, 168, 0.35)';
+      context.beginPath();
+      context.arc(cloud.x - 22, cloud.y + 12, cloud.radius * 0.45, 0, Math.PI * 2);
+      context.fill();
+      context.beginPath();
+      context.arc(cloud.x + 24, cloud.y - 14, cloud.radius * 0.4, 0, Math.PI * 2);
+      context.fill();
     }
     // Guard cones.
     for (const guard of state.guards) {
@@ -276,16 +333,17 @@ export function createRenderer(canvas) {
         chasing ? 'rgba(229, 83, 75, 0.28)' : PALETTE.coneGuard,
         chasing ? 'rgba(229, 83, 75, 0.7)' : PALETTE.coneGuardEdge);
     }
-    // Cameras themselves.
+    // Cameras themselves: grey and crossed out when hacked or EMP-blacked.
     for (const camera of state.cameras) {
-      context.fillStyle = camera.hacked ? '#555c66' : '#2b2f38';
+      const dead = camera.hacked || emp;
+      context.fillStyle = dead ? '#555c66' : '#2b2f38';
       context.beginPath();
       context.arc(camera.x, camera.y, 9, 0, Math.PI * 2);
       context.fill();
-      context.strokeStyle = camera.hacked ? '#888' : PALETTE.laser;
+      context.strokeStyle = dead ? '#888' : PALETTE.laser;
       context.lineWidth = 2;
       context.stroke();
-      if (camera.hacked) text('✕', camera.x, camera.y + 4, 11, '#ff6b60', 'center');
+      if (dead) text('✕', camera.x, camera.y + 4, 11, '#ff6b60', 'center');
       else {
         context.fillStyle = PALETTE.laser;
         context.beginPath();
@@ -372,9 +430,17 @@ export function createRenderer(canvas) {
     text(room.name, 24, 30, 24, PALETTE.text);
     text(room.floor, 24, 56, 15, PALETTE.muted);
     text(room.objective, FIELD.width / 2, 30, 17, PALETTE.gold, 'center');
-    text(state.thief.carrying ? 'Loot secured — reach the GETAWAY door!' : 'Hold E at the case to crack it · E at ⚡ to hack a camera', FIELD.width / 2, 56, 14, PALETTE.muted, 'center');
+    text(state.thief.carrying ? 'Loot secured — reach the GETAWAY door!' : 'Hold E at the case to crack it · E at ⚡ to hack a camera · Q smoke · F EMP · vents hide you', FIELD.width / 2, 56, 14, PALETTE.muted, 'center');
     text(`TAKE ${money(take)}`, FIELD.width - 24, 30, 22, PALETTE.gold, 'right');
     text(`⏱ ${clock(state.elapsed)}   ● COINS ×${state.coins}`, FIELD.width - 24, 56, 15, PALETTE.text, 'right');
+    text(`SMOKE ×${state.tools.smoke} [Q] · EMP ×${state.tools.emp} [F]`, FIELD.width - 24, 78, 13, PALETTE.text, 'right');
+    // The getaway van waits 20 seconds: a live countdown in the middle of
+    // the HUD, so the escape pressure is visible in every frame.
+    if (state.getaway.active) {
+      const seconds = Math.ceil(state.getaway.timer);
+      const urgent = seconds <= 5;
+      text(`🚐 GETAWAY VAN — ${seconds}s — reach the door!`, FIELD.width / 2, 78, urgent ? 17 : 15, urgent ? PALETTE.alarm : PALETTE.gold, 'center');
+    }
     // The big ALARM meter.
     const barX = 24;
     const barY = HUD_HEIGHT + 10;
@@ -428,11 +494,12 @@ export function createRenderer(canvas) {
       : totalTake + state.take;
     if (screen === SCREEN_TITLE) {
       const lines = [
-        'Three floors. Three treasures. One way out.',
+        'Four floors. Four treasures. One way out.',
         'Slip past the guards and their amber cones —',
         'red camera sweeps and blinking lasers raise the alarm.',
         'Hold E to crack the case · E at ⚡ hacks a camera ·',
         'click to toss a coin and lure a guard · Shift sneaks · P pauses.',
+        'Q drops smoke · F fires the EMP · vents hide you.',
         '',
         `Best take yet: ${money(best)}`,
       ];
@@ -446,18 +513,22 @@ export function createRenderer(canvas) {
       const lines = [
         `${state.room.name} cleared — ${money(state.take)} this room.`,
         `Total take so far: ${money(take)}`,
-        state.roomIndex + 1 < 3 ? 'The next floor is guarded harder.' : '',
+        state.getaway.rank ? `Getaway rank: ${state.getaway.rank} — ${Math.ceil(state.getaway.timer)}s to spare.` : '',
+        state.roomIndex + 1 < ROOMS.length ? 'The next floor is guarded harder.' : '',
       ];
-      drawPanel('ROOM CLEAR', lines, state.roomIndex + 1 < 3 ? 'Press Space for the next floor' : 'Press Space to finish');
+      drawPanel('ROOM CLEAR', lines, state.roomIndex + 1 < ROOMS.length ? 'Press Space for the next floor' : 'Press Space to finish');
     } else if (screen === SCREEN_CAUGHT) {
       const lines = state.caughtReason === 'lockdown'
         ? ['The alarm hit 100% — the Meridian went into lockdown.', 'The vault doors sealed with you inside.']
-        : ['A guard caught you in the open.', 'Suspicion is fair warning: break line of sight.'];
+        : state.caughtReason === 'van'
+          ? ['The getaway van left without you.', 'Twenty seconds is all the van waits.']
+          : ['A guard caught you in the open.', 'Suspicion is fair warning: break line of sight.'];
+      if (state.caughtBy) lines.push(`Caught by: ${state.caughtBy}`);
       drawPanel('CAUGHT', lines, 'Press Space to try the room again');
     } else if (screen === SCREEN_PERFECT) {
       const lines = [
         `You walked out of the Meridian with ${money(totalTake)}.`,
-        'Three floors, three treasures, one clean getaway.',
+        'Four floors, four treasures, one clean getaway.',
         `Best take yet: ${money(best)}`,
       ];
       drawPanel('PERFECT HEIST', lines, 'Press Space to run it again');

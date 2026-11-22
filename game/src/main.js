@@ -3,12 +3,12 @@
 // renderer paints what is there. The game moves between six screens: title,
 // play, paused, room clear, caught and perfect heist.
 //
-// ?seed=N fixes the camera and laser phases. ?shot=start|play|end (with
-// &seed=N) stages that scene instead of running the loop, paints it twice
-// and sets window.__shotReady for a screenshot.
+// ?seed=N fixes the camera and laser phases. ?shot=start|play|cover|end
+// (with &seed=N and &room=N) stages that scene instead of running the
+// loop, paints it twice and sets window.__shotReady for a screenshot.
 import { BEST_KEY, STEP } from './config.js';
 import { createRandom } from './random.js';
-import { createWorld, EVENT_CAUGHT, EVENT_CLEAR, EVENT_COIN, EVENT_HACK, EVENT_LASER, EVENT_LOOT, EVENT_PICKUP, EVENT_SPOT, CAUGHT_LOCKDOWN } from './world.js';
+import { createWorld, EVENT_CAUGHT, EVENT_CLEAR, EVENT_COIN, EVENT_EMP, EVENT_HACK, EVENT_LASER, EVENT_LOOT, EVENT_PICKUP, EVENT_SMOKE, EVENT_SPOT, CAUGHT_LOCKDOWN, CAUGHT_VAN } from './world.js';
 import { ACTION_CONFIRM, ACTION_MUTE, ACTION_PAUSE, createInput } from './input.js';
 import { createAudio } from './audio.js';
 import { createRenderer, SCREEN_CAUGHT, SCREEN_CLEAR, SCREEN_PAUSED, SCREEN_PERFECT, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
@@ -124,6 +124,8 @@ function runGame() {
     if (events & EVENT_LOOT) audio.loot();
     if (events & EVENT_SPOT) audio.spotted();
     if (events & EVENT_LASER) audio.laserTrip();
+    if (events & EVENT_SMOKE) audio.smoke();
+    if (events & EVENT_EMP) audio.emp();
     if (events & EVENT_CLEAR) audio.roomClear();
     if (events & EVENT_CAUGHT) audio.caught();
     if (events & EVENT_CLEAR) {
@@ -137,7 +139,9 @@ function runGame() {
       screen = SCREEN_CAUGHT;
       announce(world.state.caughtReason === CAUGHT_LOCKDOWN
         ? 'Caught: the alarm hit 100% and the Meridian locked down.'
-        : 'Caught by a guard.');
+        : world.state.caughtReason === CAUGHT_VAN
+          ? 'Caught: the getaway van left without you.'
+          : `Caught by ${world.state.caughtBy || 'a guard'}.`);
     }
   }
 
@@ -168,12 +172,16 @@ function runGame() {
     }
     const steer = input.steer();
     const throwAt = input.takeThrow();
+    const smoke = input.takeSmoke();
+    const emp = input.takeEmp();
     const events = world.step(STEP, {
       dx: steer.x,
       dy: steer.y,
       sneak: input.sneak(),
       use: input.interact(),
       throwAt,
+      smoke,
+      emp,
     }, false);
     if (world.state.crackProgress > 0 && world.state.elapsed - crackSoundAt > 0.35) {
       crackSoundAt = world.state.elapsed;

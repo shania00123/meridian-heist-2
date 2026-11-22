@@ -16,6 +16,8 @@ const PAUSE = new Set(['KeyP', 'Escape']);
 const SNEAK = new Set(['ShiftLeft', 'ShiftRight']);
 const INTERACT = new Set(['KeyE']);
 const MUTE = new Set(['KeyM']);
+const SMOKE = new Set(['KeyQ']);
+const EMP = new Set(['KeyF']);
 
 /**
  * `toWorld` converts a pointer event's client coordinates into playfield
@@ -25,6 +27,8 @@ export function createInput(canvas, toWorld) {
   const held = new Set();
   let actions = 0;
   let throwAt = null;
+  let smokeQueued = false;
+  let empQueued = false;
 
   window.addEventListener('keydown', (event) => {
     if (UP.has(event.code) || DOWN.has(event.code) || LEFT.has(event.code) ||
@@ -41,6 +45,10 @@ export function createInput(canvas, toWorld) {
       event.preventDefault();
     } else if (MUTE.has(event.code)) {
       if (!event.repeat) actions |= ACTION_MUTE;
+    } else if (SMOKE.has(event.code)) {
+      if (!event.repeat) smokeQueued = true;
+    } else if (EMP.has(event.code)) {
+      if (!event.repeat) empQueued = true;
     }
   });
   window.addEventListener('keyup', (event) => {
@@ -89,6 +97,18 @@ export function createInput(canvas, toWorld) {
     takeThrow() {
       const taken = throwAt;
       throwAt = null;
+      return taken;
+    },
+    /** True when Q was pressed since the last call: drop a smoke bomb. */
+    takeSmoke() {
+      const taken = smokeQueued;
+      smokeQueued = false;
+      return taken;
+    },
+    /** True when F was pressed since the last call: fire the EMP. */
+    takeEmp() {
+      const taken = empQueued;
+      empQueued = false;
       return taken;
     },
   };
