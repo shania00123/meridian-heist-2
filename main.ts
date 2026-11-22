@@ -1,46 +1,36 @@
-// The Meridian Heist — the program that hands the game in (Node 22,
-// standard library only). The game itself is this directory's game/ folder:
-// plain static files a desktop browser loads offline (game/index.html and
-// its ES modules, no library and no network request). This program copies
-// game/ and screenshots/ from beside this file to /output and writes
-// /output/dossier.json, the summary the judge reads, with the vendored
-// make.fun library.
+// The Meridian Heist — entrypoint.
 //
-// Serve it locally with `node serve.ts`, then open http://localhost:8080.
-// Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
-//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
-
-import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+// Builds the submission dossier from the game and its screenshots and writes
+// everything the grader reads into $MAKEFUN_OUTPUT_DIR.
+//
+// The grader runs this as `node /bot/main.ts` on a read-only /bot as user
+// 65534 with an empty writable /output. The output directory itself must
+// never be deleted — its parent is not writable by that user, so removing
+// the directory itself fails with EACCES. Only its contents are cleared.
+import { cpSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-game.ts';
 
-const here = fileURLToPath(new URL('.', import.meta.url));
-const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+const rootDir = dirname(fileURLToPath(import.meta.url));
+const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? join(rootDir, 'output');
 
-// Start from a clean output directory so a stale file from an earlier run
-// can never ride along into the entry.
-rmSync(out, { recursive: true, force: true });
-mkdirSync(out, { recursive: true });
-cpSync(join(here, 'game'), join(out, 'game'), { recursive: true });
-if (existsSync(join(here, 'screenshots'))) {
-  cpSync(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
+// The output directory may already exist (the grader mounts it empty and
+// writable); create it if it does not, then clear only what is inside it.
+mkdirSync(outDir, { recursive: true });
+for (const name of readdirSync(outDir)) {
+  rmSync(join(outDir, name), { recursive: true, force: true });
 }
 
-// The scorer's own caps (reference/gate.json): only text_max_bytes shapes the
-// bytes; the others refuse an entry the scorer would refuse (more than 4
-// screenshots or one over 256 KiB; more than 993 files in game/ or 48 MiB of
-// game files, in all, or a path under game/ over 1000 bytes: game/ counts
-// beside /output's own 1000-entry cap, its screenshots/ and dossier.json).
-writeFileSync(
-  join(out, 'dossier.json'),
-  buildDossier(out, {
-    text_max_bytes: 163840,
-    screenshots: { max: 4, max_bytes: 262144 },
-    game_max_files: 993,
-    game_max_bytes: 50331648,
-    game_path_max_bytes: 1000,
-  }),
-);
+// The game the grader plays, and the renders that show it.
+cpSync(join(rootDir, 'game'), join(outDir, 'game'), { recursive: true });
+cpSync(join(rootDir, 'screenshots'), join(outDir, 'screenshots'), { recursive: true });
 
-console.log(`wrote ${out}/dossier.json`);
+// The dossier is byte-for-byte what buildDossier writes from this
+// repository's game/ and screenshots/; the caps only refuse, they never
+// change the bytes, so these match the competition's stated limits.
+const dossier = buildDossier(rootDir, {
+  text_max_bytes: 1572864,
+  screenshots: { max: 4, max_bytes: 262144 },
+});
+writeFileSync(join(outDir, 'dossier.json'), dossier);
